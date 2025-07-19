@@ -60,12 +60,15 @@ def decrypt_password(ciphertext, secret_key):
 
 def get_db_connection(chrome_login_db):
     """Copy and connect to the Chromium-based browser's SQLite Login Data database."""
+    import tempfile
     try:
-        shutil.copy2(chrome_login_db, "Loginvault.db")  # Make a temp copy
-        return sqlite3.connect("Loginvault.db")
+        temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+        shutil.copy2(chrome_login_db, temp_db.name)
+        temp_db.close()
+        return sqlite3.connect(temp_db.name), temp_db.name
     except Exception as e:
         print(f"[ERROR] Could not connect to database: {e}")
-        return None
+        return None, None
 
 def extract_login_data(cursor):
     """Extract login credentials (URL, username, encrypted password) from the database cursor."""
@@ -78,30 +81,34 @@ def extract_login_data(cursor):
 
 def process_profile(secret_key, profile_folder, csv_writer, browser):
     """Process a specific browser profile folder and extract login credentials."""
+    import tempfile
     login_db_path = os.path.join(BROWSERS[browser]["user_data"], profile_folder, "Login Data")
-    conn = get_db_connection(login_db_path)
-    
+    conn, temp_db_path = get_db_connection(login_db_path)
     if not conn or not secret_key:
+        if temp_db_path:
+            try:
+                os.remove(temp_db_path)
+            except Exception:
+                pass
         return
-    
     try:
-        cursor = conn.cursor()
-        logins = extract_login_data(cursor)
-        for index, (url, username, encrypted_password) in enumerate(logins):
-            if url and username and encrypted_password:
-                decrypted_password = decrypt_password(encrypted_password, secret_key)
-                if decrypted_password:
-                    print(f"URL: {url}\nUsername: {username}\nPassword: {decrypted_password}\n{'*'*50}")
-                    csv_writer.writerow([index, url, username, decrypted_password])
+        with conn:
+            with conn.cursor() as cursor:
+                logins = extract_login_data(cursor)
+                for index, (url, username, encrypted_password) in enumerate(logins):
+                    if url and username and encrypted_password:
+                        decrypted_password = decrypt_password(encrypted_password, secret_key)
+                        if decrypted_password:
+                            print(f"URL: {url}\nUsername: {username}\nPassword: {decrypted_password}\n{'*'*50}")
+                            csv_writer.writerow([index, url, username, decrypted_password])
     except Exception as e:
         print(f"[ERROR] Failed to process profile '{profile_folder}' for {browser}: {e}")
     finally:
-        cursor.close()
-        conn.close()
-        try:
-            os.remove("Loginvault.db")
-        except Exception as e:
-            print(f"[ERROR] Could not delete temp file 'Loginvault.db': {e}")
+        if temp_db_path:
+            try:
+                os.remove(temp_db_path)
+            except Exception as e:
+                print(f"[ERROR] Could not delete temp file '{temp_db_path}': {e}")
 
 def process_browser(browser):
     """Process all profiles for a given browser."""
